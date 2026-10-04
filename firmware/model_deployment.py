@@ -1731,49 +1731,52 @@ def predict_activity_features(features):
 
 
 def calculate_skew_manual(x_list):
+    # Population moments, as in the training code (calculate_skew_kurt_manual).
     n = len(x_list)
-    if n <= 1:
+    if n == 0:
         return 0.0
     mean_x = sum(x_list) / n
-    diffs = [xi - mean_x for xi in x_list]
-    m2 = sum(d ** 2 for d in diffs) / (n - 1)
-    m3 = sum(d ** 3 for d in diffs) / n
+    m2 = sum((xi - mean_x) ** 2 for xi in x_list) / n
+    m3 = sum((xi - mean_x) ** 3 for xi in x_list) / n
     if m2 == 0:
         return 0.0
     return m3 / (m2 ** 1.5)
 
 def calculate_kurt_manual(x_list):
+    # Non-excess kurtosis m4 / m2^2 from population moments, as in training.
     n = len(x_list)
-    if n <= 3:
+    if n == 0:
         return 0.0
     mean_x = sum(x_list) / n
-    diffs = [xi - mean_x for xi in x_list]
-    m2 = sum(d ** 2 for d in diffs) / (n - 1)
-    m4 = sum(d ** 4 for d in diffs) / n
+    m2 = sum((xi - mean_x) ** 2 for xi in x_list) / n
+    m4 = sum((xi - mean_x) ** 4 for xi in x_list) / n
     if m2 == 0:
         return 0.0
-    return (m4 / (m2 ** 2)) - 3
+    return m4 / (m2 ** 2)
 
 def calculate_entropy_manual(x_list, num_bins=5):
+    # Same binning as np.histogram(x, bins=num_bins): edges from linspace,
+    # last bin closed, with numpy's edge corrections.
     min_x = min(x_list)
     max_x = max(x_list)
     if min_x == max_x:
         return 0.0
-    bin_width = (max_x - min_x) / num_bins
-    if bin_width == 0:
-        return 0.0
+    span = max_x - min_x
+    step = span / num_bins
+    edges = [k * step + min_x for k in range(num_bins)] + [max_x]
     histogram = [0] * num_bins
     for val in x_list:
-        bin_idx = int((val - min_x) / bin_width)
-        if bin_idx >= num_bins:
-            bin_idx = num_bins - 1
-        histogram[bin_idx] += 1
-    total = sum(histogram)
-    if total == 0:
-        return 0.0
+        idx = int((val - min_x) / span * num_bins)
+        if idx >= num_bins:
+            idx = num_bins - 1
+        if val < edges[idx]:
+            idx -= 1
+        elif idx < num_bins - 1 and val >= edges[idx + 1]:
+            idx += 1
+        histogram[idx] += 1
+    total = len(x_list)
     probabilities = [h / total for h in histogram if h > 0]
-    entropy = -sum(p * math.log2(p) for p in probabilities if p > 0)
-    return entropy
+    return -sum(p * math.log2(p) for p in probabilities)
 
 def calculate_dominant_freq_fft(x_list, num_bins=5):
     n = len(x_list)
@@ -1828,27 +1831,49 @@ def calculate_spectral_entropy_manual(x_list, num_bins=5):
             spectral_entropy -= p * math.log2(p)
     return spectral_entropy
 
+def _sign(v):
+    return 1 if v > 0 else (-1 if v < 0 else 0)
+
 def calculate_zero_crossing_rate(x_list):
+    # Changes of sign(x) with sign(0) = 0, like np.diff(np.sign(x)) != 0.
     if len(x_list) <= 1:
         return 0.0
     crossings = 0
-    prev_sign = 1 if x_list[0] >= 0 else -1
-    for i in range(1, len(x_list)):
-        curr_sign = 1 if x_list[i] >= 0 else -1
+    prev_sign = _sign(x_list[0])
+    for val in x_list[1:]:
+        curr_sign = _sign(val)
         if curr_sign != prev_sign:
             crossings += 1
         prev_sign = curr_sign
     return crossings / (len(x_list) - 1)
 
 def calculate_autocorr_lag1(x_list):
-    if len(x_list) <= 1:
+    # Pearson correlation of x[:-1] and x[1:], like np.corrcoef(...)[0, 1].
+    n = len(x_list)
+    if n <= 2:
         return 0.0
-    mean_x = sum(x_list) / len(x_list)
-    numerator = sum((x_list[i] - mean_x) * (x_list[i+1] - mean_x) for i in range(len(x_list)-1))
-    denominator = sum((x_i - mean_x)**2 for x_i in x_list)
-    if denominator == 0:
-        return 0.0
-    return numerator / denominator
+    a = x_list[:-1]
+    b = x_list[1:]
+    mean_a = sum(a) / (n - 1)
+    mean_b = sum(b) / (n - 1)
+    s_ab = sum((a[i] - mean_a) * (b[i] - mean_b) for i in range(n - 1))
+    s_aa = sum((v - mean_a) ** 2 for v in a)
+    s_bb = sum((v - mean_b) ** 2 for v in b)
+    if s_aa == 0 or s_bb == 0:
+        return 0.0  # numpy gives nan for a constant window
+    return s_ab / math.sqrt(s_aa * s_bb)
+
+def _percentile_linear(sorted_x, q):
+    # np.percentile's default 'linear' method on already sorted data.
+    pos = q * (len(sorted_x) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_x) - 1)
+    t = pos - lo
+    a = sorted_x[lo]
+    b = sorted_x[hi]
+    if t >= 0.5:
+        return b - (b - a) * (1 - t)
+    return a + (b - a) * t
 
 def extract_features_from_channel_manual(x_list):
     features = []
@@ -1872,14 +1897,17 @@ def extract_features_from_channel_manual(x_list):
     mad_x = sum(abs(xi - mean_x) for xi in x_list) / n
     sorted_x = sorted(x_list)
     median_x = sorted_x[n // 2] if n % 2 == 1 else (sorted_x[n // 2 - 1] + sorted_x[n // 2]) / 2
-    q75_idx = int(0.75 * (n - 1))
-    q25_idx = int(0.25 * (n - 1))
-    iqr_x = sorted_x[q75_idx] - sorted_x[q25_idx]
+    iqr_x = _percentile_linear(sorted_x, 0.75) - _percentile_linear(sorted_x, 0.25)
     autocorr_x = calculate_autocorr_lag1(x_list)
     features.extend([rms_x, zcr_x, mad_x, median_x, iqr_x, autocorr_x])
 
-    jerk_diffs = [(x_list[i] - x_list[i-1]) for i in range(1, n)] if n > 1 else [0.0]
-    std_jerk_x = math.sqrt(sum(d**2 for d in jerk_diffs) / (len(jerk_diffs) - 1)) if len(jerk_diffs) > 1 else 0.0
+    # population std of the first differences, like np.std(np.diff(x))
+    jerk_diffs = [(x_list[i] - x_list[i-1]) for i in range(1, n)]
+    if jerk_diffs:
+        mean_jerk = sum(jerk_diffs) / len(jerk_diffs)
+        std_jerk_x = math.sqrt(sum((d - mean_jerk) ** 2 for d in jerk_diffs) / len(jerk_diffs))
+    else:
+        std_jerk_x = 0.0
     wl_sum = 0.0
     for i in range(1, n):
         wl_sum += abs(x_list[i] - x_list[i-1])

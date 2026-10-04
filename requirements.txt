@@ -1,0 +1,12 @@
+# Host-side tools and notebooks (the firmware runs on MicroPython/OpenMV on the board)
+numpy
+pandas
+scikit-learn
+optuna
+matplotlib
+seaborn
+joblib
+streamlit          # host/imu_data_visualizer.py, host/prediction_visualizer.py
+plotly
+m2cgen             # optional exports in model_development.ipynb
+micromlgen
